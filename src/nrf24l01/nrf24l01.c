@@ -318,17 +318,16 @@ int8_t nrf24l01_set_ptx(int8_t spi_fd, uint8_t pipe, bool ack)
 	/* TX Settling */
 
 	/*
-	 * If the ack option is disable is necessary disable auto-ack in pipe 0
-	 * because ack always arrive in pipe 0
-	 * and the ack is enable for all pipe by default
+	 * If the ack option is disable is necessary disable auto-ack this pipe
+	 * because ack is enable for all pipe by default
 	 * as configured in init
 	 */
 	if (!ack)
 		outr(spi_fd, NRF24_EN_AA, inr(spi_fd, NRF24_EN_AA)
-				& ~pipe_reg[0].enaa);
+				& ~pipe_reg[pipe].enaa);
 	else
 		outr(spi_fd, NRF24_EN_AA, inr(spi_fd, NRF24_EN_AA)
-				| pipe_reg[0].enaa);
+				| pipe_reg[pipe].enaa);
 
 	set_address_pipe(spi_fd, NRF24_RX_ADDR_P0,
 						get_address_pipe(spi_fd, pipe));
