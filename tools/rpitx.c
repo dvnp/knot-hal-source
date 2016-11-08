@@ -75,16 +75,16 @@ int main(int argc, char *argv[])
 	nrf24l01_set_channel(spi_fd, 10);
 	nrf24l01_set_standby(spi_fd);
 	//open pipe 0
-	nrf24l01_open_pipe(spi_fd, 0, aa_pipes[0]);
-	nrf24l01_open_pipe(spi_fd, 1, aa_pipes[1]);
-	nrf24l01_open_pipe(spi_fd, 2, aa_pipes[2]);
+	nrf24l01_open_pipe(spi_fd, 0, aa_pipes[0], true);
+	nrf24l01_open_pipe(spi_fd, 1, aa_pipes[1], true);
+	nrf24l01_open_pipe(spi_fd, 2, aa_pipes[2], true);
 	// printf("open pip 1\n");
 	// nrf24l01_open_pipe(1, aa_pipes[1], spi_fd);
 
 	// printf("set ptx 1\n");
 	// nrf24l01_set_ptx(1, true);
 	printf("set ptx 2\n");
-	nrf24l01_set_ptx(spi_fd, 2, true);
+	nrf24l01_set_ptx(spi_fd, 2);
 
 	main_loop = g_main_loop_new(NULL, FALSE);
 	timeout_id = g_timeout_add_seconds(1, timeout_watch, NULL);

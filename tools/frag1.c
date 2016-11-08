@@ -62,7 +62,7 @@ static gboolean timeout_watch_client(gpointer user_data)
 	// /* Puts the radio in TX mode  enabling Acknowledgment */
 	// nrf24l01_set_ptx(1, true);
 
-	nrf24l01_set_ptx(spi_fd, 3, true);
+	nrf24l01_set_ptx(spi_fd, 3);
 	/* Transmits the data */
 	nrf24l01_ptx_data(spi_fd, &buffer, sizeof(buffer));
 
@@ -113,10 +113,10 @@ static int radio_init(void)
 	printf("spi_fd is %d\n", spi_fd);
 	nrf24l01_set_channel(spi_fd,10);
 	nrf24l01_set_standby(spi_fd);
-	nrf24l01_open_pipe(spi_fd, 0, aa_pipes[0]);
-	nrf24l01_open_pipe(spi_fd, 1, aa_pipes[1]);
-	nrf24l01_open_pipe(spi_fd, 2, aa_pipes[2]);
-	nrf24l01_open_pipe(spi_fd, 3, aa_pipes[3]);
+	nrf24l01_open_pipe(spi_fd, 0, aa_pipes[0], false);
+	nrf24l01_open_pipe(spi_fd, 1, aa_pipes[1], true);
+	nrf24l01_open_pipe(spi_fd, 2, aa_pipes[2], true);
+	nrf24l01_open_pipe(spi_fd, 3, aa_pipes[3], true);
 	nrf24l01_set_prx(spi_fd, aa_pipes[0]);
 
 	return 0;
