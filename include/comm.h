@@ -7,6 +7,9 @@
  *
  */
 
+#include "stdint.h"
+#include "unistd.h"
+
 /* Domain: selects radio technology */
 #define HAL_COMM_PF_NRF24		1
 
@@ -14,6 +17,8 @@
  * UDATA: Sequenced and reliable protocol
  */
 #define HAL_COMM_NRF24PROTO_UDATA	64
+
+#define HAL_COMM_NRF24PROTO_MGMT	65
 
 /* Serial port */
 int hal_comm_open(const char *pathname);
