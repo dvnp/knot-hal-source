@@ -15,3 +15,4 @@
 #define EPERM			01	/* Operation not permitted */
 #define EUSERS			87	/* Too many users */
 #define ECOMM			70	/* Communication error on send */
+#define ENODATA			61	/* No data available */

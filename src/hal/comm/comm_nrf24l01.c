@@ -19,6 +19,7 @@
 #include <unistd.h>
 #endif
 
+#include "include/nrf24.h"
 #include "nrf24l01.h"
 #include "nrf24l01_ll.h"
 #include "include/comm.h"
@@ -26,6 +27,18 @@
 #include "phy_driver_nrf24.h"
 
 
+struct nrf24_thing
+{
+	int8_t pipe;
+	uint64_t addr;
+	uint8_t seq_rx;
+	uint8_t seq_tx;
+	char buffer_rx[5][30];
+	char buffer_tx[5][30];
+
+};
+
+struct nrf24_thing my_things[5];
 int8_t pipes_allocate[] = {0, 0, 0, 0, 0};
 
 int driverIndex = -1;
@@ -126,7 +139,29 @@ int hal_comm_listen(int sockfd)
 int hal_comm_accept(int sockfd, uint64_t *addr)
 {
 
-	return -ENOSYS;
+	uint8_t datagram[NRF24_MTU];
+	struct nrf24_ll_mgmt_pdu *ipdu = (struct nrf24_ll_mgmt_pdu *) datagram;
+	ssize_t len;
+	struct nrf24_io_pack packt_drive;
+	struct nrf24_ll_mgmt_connect *payload =
+				(struct nrf24_ll_mgmt_connect *) ipdu->payload;
+
+	/* read connect_request from pipe broadcast */
+	packt_drive.pipe = PIPE_BROADCAST;
+	len = phy_read(driverIndex, &packt_drive, NRF24_MTU);
+	if (len < 0)
+		return -ENODATA;
+
+	memcpy(datagram, packt_drive.payload, NRF24_MTU);
+
+	if (ipdu->type != NRF24_PDU_TYPE_CONNECT_REQ)
+		return -EINVAL;
+
+	/* If this packet is not for me*/
+	if (payload->dst_addr != my_things[sockfd].addr)
+		return -EINVAL;
+
+	return sockfd;
 }
 
 
