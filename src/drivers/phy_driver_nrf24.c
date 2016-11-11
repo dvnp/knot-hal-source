@@ -110,7 +110,7 @@ static int nrf24l01_ioctl(int spi_fd, int cmd, void *arg)
 	switch (cmd) {
 
 	/* Command to set address pipe */
-	case CMD_SET_PIPE:
+	case NRF24_CMD_SET_PIPE:
 		{
 			struct addr_pipe *addrpipe = (struct addr_pipe *) arg;
 
@@ -120,7 +120,7 @@ static int nrf24l01_ioctl(int spi_fd, int cmd, void *arg)
 		break;
 
 	/* Command to set channel pipe */
-	case CMD_SET_CHANNEL:
+	case NRF24_CMD_SET_CHANNEL:
 		err = nrf24l01_set_channel(spi_fd, *((int *) arg));
 		break;
 
