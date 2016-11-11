@@ -23,7 +23,36 @@
 #include "phy_driver.h"
 #include "phy_driver_nrf24.h"
 
-int8_t pipes_allocate[] = {0, 0, 0, 0, 0};
+#define DATA_SIZE 128
+
+/* Structure to save broadcast context */
+struct nrf24_mgmt {
+	uint8_t buffer_rx[30];
+	size_t len_rx;
+};
+
+struct nrf24_mgmt mgmt = {.len_rx = 0};
+
+/* Structure to save peers context */
+struct nrf24_data {
+	int8_t pipe;
+	uint8_t buffer_rx[DATA_SIZE];
+	size_t len_rx;
+};
+
+#ifndef ARDUINO	/* If gateway then 5 peers */
+struct nrf24_data peers[5] = {
+	{.pipe = -1, .len_rx = 0},
+	{.pipe = -1, .len_rx = 0},
+	{.pipe = -1, .len_rx = 0},
+	{.pipe = -1, .len_rx = 0},
+	{.pipe = -1, .len_rx = 0}
+};
+#else	/* If thing then 1 peer */
+struct nrf24_data peers[1] = {
+	{.pipe = -1, .len_rx = 0},
+};
+#endif
 
 static uint8_t aa_pipes[6][5] = {
 	{0x8D, 0xD9, 0xBE, 0x96, 0xDE},
@@ -34,18 +63,22 @@ static uint8_t aa_pipes[6][5] = {
 	{0xF0, 0x96, 0xB6, 0xC1, 0x6B}
 };
 
+/* ARRAY SIZE */
+#define CONNECTION_COUNTER	((int) (sizeof(peers) \
+				 / sizeof(peers[0])))
+
 int driverIndex = -1;
 
 /* Local functions */
-inline int get_free_pipe(void)
+static int get_free_pipe(void)
 {
 	uint8_t i;
 
-	for (i = 0; i < sizeof(pipes_allocate); i++) {
-		if (pipes_allocate[i] == 0) {
+	for (i = 0; i < CONNECTION_COUNTER; i++) {
+		if (peers[i].pipe == -1) {
 			/* one peer for pipe*/
-			pipes_allocate[i] = 1;
-			return i+1;
+			peers[i].pipe = i+1;
+			return peers[i].pipe;
 		}
 	}
 
@@ -119,7 +152,7 @@ int hal_comm_close(int sockfd)
 	/* Pipe 0 is not closed because ACK arrives in this pipe */
 	if (sockfd >= 1 && sockfd <= 5) {
 		/* Free pipe */
-		pipes_allocate[sockfd-1] = -1;
+		peers[sockfd-1].pipe = -1;
 		phy_ioctl(driverIndex, CMD_RESET_PIPE, &sockfd);
 	}
 
@@ -128,8 +161,45 @@ int hal_comm_close(int sockfd)
 
 ssize_t hal_comm_read(int sockfd, void *buffer, size_t count)
 {
+	size_t length = 0;
 
-	return -ENOSYS;
+	/* TODO: Run background procedures here */
+
+	if (sockfd < 0 || sockfd > 5 || count == 0)
+		return -EINVAL;
+
+	/* If management */
+	if (sockfd == 0) {
+		/* If has something to read */
+		if (mgmt.len_rx != 0) {
+			/*
+			 * If the amount of bytes available
+			 * to be read is greather than count
+			 * then read count bytes
+			 */
+			length = mgmt.len_rx > count ? count : mgmt.len_rx;
+			/* Copy rx buffer */
+			memcpy(buffer, mgmt.buffer_rx, length);
+
+			/* Reset rx len */
+			mgmt.len_rx = 0;
+		}
+	} else if (peers[sockfd-1].len_rx != 0) {
+		/*
+		 * If the amount of bytes available
+		 * to be read is greather than count
+		 * then read count bytes
+		 */
+		length = peers[sockfd-1].len_rx > count ?
+				 count : peers[sockfd-1].len_rx;
+		/* Copy rx buffer */
+		memcpy(buffer, peers[sockfd-1].buffer_rx, length);
+		/* Reset rx len */
+		peers[sockfd-1].len_rx = 0;
+	}
+
+	/* Returns the amount of bytes read */
+	return length;
 }
 
 ssize_t hal_comm_write(int sockfd, const void *buffer, size_t count)
