@@ -28,9 +28,14 @@
 
 #define _MIN(a, b)		((a) < (b) ? (a) : (b))
 
+
+static uint8_t listen;
+static uint8_t connection_live;
 /* TODO: Get this values from config file */
 static const struct nrf24_mac addr_gw = {
 					.address.uint64 = 0xDEADBEEF12345678};
+static const struct nrf24_mac addr_thing = {
+					.address.uint64 = 0xACDCDEAD98765432};
 static uint8_t channel_data = 20;
 static uint8_t channel_mgmt= 10;
 
@@ -316,7 +321,46 @@ static inline int send_mgmt(int spi_fd)
 
 	return err;
 }
+static inline void listen_connect(int spi_fd)
+{
+	struct nrf24_io_pack p;
+	struct nrf24_ll_mgmt_pdu *opdu = (void *)p.payload;
+	struct nrf24_mac *payload =
+				(struct nrf24_mac *) opdu->payload;
+	size_t len;
+	static unsigned long start;
+	/* Start timeout */
+	static uint8_t state = 0;
 
+	switch (state) {
+	case 0:
+		/* Send Presence */
+		p.pipe = 0;
+		opdu->type = NRF24_PDU_TYPE_PRESENCE;
+		payload->address.uint64 = addr_thing.address.uint64;
+		len = sizeof(struct nrf24_ll_mgmt_pdu)+sizeof(struct nrf24_mac);
+		phy_write(spi_fd, &p, len);
+		/* Init time */
+		start = hal_time_ms();
+		state = 1;
+		break;
+	case 1:
+		if (hal_timeout(hal_time_ms(), start, 1) > 0){
+			state = 2;
+		}
+		break;
+	case 2:
+		phy_ioctl(spi_fd, NRF24_CMD_SET_STANDBY, &state);
+		start = hal_time_ms();
+		state = 3;
+		break;
+	case 3:
+		if (hal_timeout(hal_time_ms(), start, 1) > 0){
+			state = 0;
+		}
+		break;
+	}
+}
 static inline int running()
 {
 
@@ -338,8 +382,11 @@ static inline int running()
 	case 1:
 		/* Check if 10ms timeout occurred */
 		if (hal_timeout(hal_time_ms(), start, 10) > 0)
-			state = 2;
+			if(connection_live > 0)
+				state = 2;
 
+		if(listen)
+			listen_connect(driverIndex);
 		/* Read management packets until timeout occurs */
 		read_mgmt(driverIndex);
 		break;
@@ -464,6 +511,7 @@ int hal_comm_close(int sockfd)
 		/* Free pipe */
 		peers[sockfd-1].pipe = -1;
 		phy_ioctl(driverIndex, NRF24_CMD_RESET_PIPE, &sockfd);
+		connection_live--;
 	}
 
 	return 0;
@@ -536,38 +584,34 @@ ssize_t hal_comm_write(int sockfd, const void *buffer, size_t count)
 }
 int hal_comm_listen(int sockfd)
 {
-
+	//init listen
+	listen = 1;
 	return -ENOSYS;
 }
 
+/* Accept will send presence wait 1ms for connect request
+ * and 1 ms in standby mode */
 int hal_comm_accept(int sockfd, uint64_t *addr)
 {
 
-	uint8_t datagram[NRF24_MTU];
-	struct nrf24_ll_mgmt_pdu *ipdu = (struct nrf24_ll_mgmt_pdu *) datagram;
-	struct nrf24_ll_mgmt_connect *payload =
-			(struct nrf24_ll_mgmt_connect *) ipdu->payload;
-	size_t len;
+	struct mgmt_nrf24_header *evt =
+				(struct mgmt_nrf24_header*) mgmt.buffer_rx;
+	struct mgmt_evt_nrf24_connected *evt_connect =
+			(struct mgmt_evt_nrf24_connected *)evt->payload;;
 
-	/* Read connect_request from pipe broadcast */
-	len = mgmt.len_rx;
-	if (len == 0)
+	if(mgmt.len_tx == 0)
 		return -EAGAIN;
 
-	/* Get the response */
-	memcpy(datagram, mgmt.buffer_rx, len);
-	/* Reset rx len */
-	mgmt.len_rx = 0;
-	/* If this packet is not connect request */
-	if (ipdu->type != NRF24_PDU_TYPE_CONNECT_REQ)
-		return -EINVAL;
-	/* If this packet is not for me*/
-	if (payload->dst_addr.address.uint64 != *addr)
-		return -EINVAL;
+	if(evt->opcode != MGMT_EVT_NRF24_CONNECTED)
+		return -EAGAIN;
 
-	return 0;
+	if(evt_connect->dst.address.uint64 != *addr)
+		return -EAGAIN;
+
+	peers[1].pipe = 1;
+	listen = 0;
+	return peers[1].pipe;
 }
-
 
 int hal_comm_connect(int sockfd, uint64_t *addr)
 {
@@ -601,6 +645,7 @@ int hal_comm_connect(int sockfd, uint64_t *addr)
 	/* Copy data to be write in tx buffer for BROADCAST*/
 	memcpy(mgmt.buffer_tx, datagram, len);
 	mgmt.len_tx = len;
+	connection_live++;
 
 	return 0;
 }
