@@ -34,8 +34,8 @@ static const char *opt_cfg = "gatewayConfig.json";
 static const char *opt_host = NULL;
 static unsigned int opt_port = 9000;
 static const char *opt_spi = "/dev/spidev0.0";
-static int opt_channel = CHANNEL_DEFAULT;
-static int opt_tx = NRF24_PWR_0DBM;
+static int opt_channel = -1;
+static int opt_dbm = -255;
 static const char *opt_nodes = "/etc/knot/keys.json";
 
 static void sig_term(int sig)
@@ -64,27 +64,11 @@ static GOptionEntry options[] = {
 					"nodes", "Known nodes file path" },
 	{ "channel", 'c', 0, G_OPTION_ARG_INT, &opt_channel,
 					"channel", "Broadcast channel" },
-	{ "tx", 't', 0, G_OPTION_ARG_INT, &opt_tx,
+	{ "tx", 't', 0, G_OPTION_ARG_INT, &opt_dbm,
 					"tx_power",
 		"TX power: transmition signal strength in dBm" },
 	{ NULL },
 };
-
-static int string_to_mac(const char *mac_str, uint8_t *address)
-{
-	/* Parse the input string into 8 bytes */
-	int rc = sscanf(mac_str,
-		"%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx",
-			address, address + 1, address + 2, address + 3,
-			address + 4, address + 5, address + 6, address + 7);
-
-	if (rc != 8) {
-		printf("Invalid mac address format: %s\n", mac_str);
-		return -EINVAL;
-	}
-
-	return 0;
-}
 
 static char *load_nodes(const char *file)
 {
@@ -144,8 +128,8 @@ static int parse_nodes(const char *nodes_str)
 			goto failure;
 
 		/* Parse mac address string into struct nrf24_mac known_peers */
-		if (string_to_mac(json_object_get_string(obj_tmp),
-						known_peers[i].address.b) < 0)
+		if (nrf24_str2mac(json_object_get_string(obj_tmp),
+						known_peers + i) < 0)
 			goto failure;
 	}
 
@@ -241,7 +225,7 @@ int main(int argc, char *argv[])
 		printf("Native SPI mode\n");
 
 	err = manager_start(opt_cfg, opt_host, opt_port, opt_spi, opt_channel,
-						opt_tx);
+								opt_dbm);
 	if (err < 0) {
 		g_main_loop_unref(main_loop);
 		return EXIT_FAILURE;

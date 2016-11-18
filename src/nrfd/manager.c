@@ -7,9 +7,7 @@
  *
  */
 
-#include <stdlib.h>
 #include <stdint.h>
-#include <stdbool.h>
 #include <unistd.h>
 #include <string.h>
 #include <stdio.h>
@@ -20,21 +18,74 @@
 #include <glib.h>
 #include <json-c/json.h>
 
-#include "phy_driver_private.h"
+#include "include/comm.h"
+#include "include/nrf24.h"
+
 #include "nrf24l01_io.h"
 #include "manager.h"
 
+static int mgmtfd;
+static guint mgmtwatch;
 
-static int radio_init(const char *spi, uint8_t channel, uint8_t tx_pwr)
+static gboolean mgmt_read_idle(gpointer user_data)
 {
+	uint8_t buffer[256];
+	const struct mgmt_nrf24_header *mhdr =
+				(const struct mgmt_nrf24_header *) buffer;
+	ssize_t rbytes;
 
+	rbytes = hal_comm_read(mgmtfd, buffer, sizeof(buffer));
+
+	/* mgmt on bad state? */
+	if (rbytes < 0 && rbytes != -EAGAIN)
+		return FALSE;
+
+	/* Nothing to read? */
+	if (rbytes == -EAGAIN)
+		return TRUE;
+
+	/* Return/ignore if it is not an event? */
+	if (!(mhdr->opcode & 0x0200))
+		return TRUE;
+
+	printf("MGMT opcode: 0x%04X\n", mhdr->opcode);
+	if (mhdr->opcode != MGMT_EVT_NRF24_BCAST_PRESENCE)
+		return TRUE;
+
+	/* If it is not connected: connect to the indicated peer */
+
+	return TRUE;
+}
+
+static int radio_init(const char *spi, uint8_t channel, uint8_t rfpwr)
+{
+	int err;
+
+	err = hal_comm_init(spi);
+	if (err < 0)
+		return err;
+
+	mgmtfd = hal_comm_socket(HAL_COMM_PF_NRF24, HAL_COMM_PROTO_MGMT);
+	if (mgmtfd < 0)
+		goto done;
+
+	mgmtwatch = g_idle_add(mgmt_read_idle, NULL);
 
 	return 0;
+done:
+	hal_comm_deinit();
+
+	return mgmtfd;
 }
 
 static void radio_stop(void)
 {
+	if (mgmtwatch)
+		g_source_remove(mgmtwatch);
 
+	hal_comm_close(mgmtfd);
+
+	hal_comm_deinit();
 }
 
 static gboolean nrf_data_watch(GIOChannel *io, GIOCondition cond,
@@ -158,9 +209,10 @@ static char *load_config(const char *file)
 	return buffer;
 }
 
-static uint8_t set_tx_input(int tx_pwr)
+/* Set TX Power from dBm to values defined at nRF24 datasheet */
+static uint8_t dbm_int2rfpwr(int dbm)
 {
-	switch (tx_pwr) {
+	switch (dbm) {
 
 	case 0:
 		return NRF24_PWR_0DBM;
@@ -175,6 +227,7 @@ static uint8_t set_tx_input(int tx_pwr)
 		return NRF24_PWR_18DBM;
 	}
 
+	/* Return default value when dBm value is invalid */
 	return NRF24_PWR_0DBM;
 }
 
@@ -183,8 +236,7 @@ static uint8_t set_tx_input(int tx_pwr)
  * parameters when/if implemented
  * in the json configuration file
  */
-static int parse_config(const char *config, const char **host, int *port,
-			const char **spi, int *channel, int *tx_pwr)
+static int parse_config(const char *config, int *channel, int *dbm)
 {
 	json_object *jobj, *obj_radio, *obj_tmp;
 
@@ -201,7 +253,7 @@ static int parse_config(const char *config, const char **host, int *port,
 		*channel = json_object_get_int(obj_tmp);
 
 	if (json_object_object_get_ex(obj_radio,  "TxPower", &obj_tmp))
-		*tx_pwr = json_object_get_int(obj_tmp);
+		*dbm = json_object_get_int(obj_tmp);
 
 	/* Success */
 	err = 0;
@@ -213,18 +265,16 @@ done:
 }
 
 int manager_start(const char *file, const char *host, int port,
-			const char *spi, int channel, int tx_pwr)
+				const char *spi, int channel, int dbm)
 {
-	uint8_t tx_pwr_radio;
-	uint8_t channel_radio = NRF24_CH_MIN;
-
+	int cfg_channel = NRF24_CH_MIN, cfg_dbm = 0;
 	char *json_str;
 	int err;
 
+	/* Command line arguments have higher priority */
 	json_str = load_config(file);
-
 	if (json_str != NULL) {
-		err = parse_config(json_str, &host, &port, &spi, &channel, &tx_pwr);
+		err = parse_config(json_str, &cfg_channel, &cfg_dbm);
 		free(json_str);
 	}
 
@@ -233,22 +283,19 @@ int manager_start(const char *file, const char *host, int port,
 		return err;
 	}
 
-	/*
-	 * Set tx_power from dBm to the values
-	 * defined on the nrf24l01 datasheet
-	 */
-	tx_pwr_radio = set_tx_input(tx_pwr);
+	 /* Validate and set the channel */
+	if (channel < 0 || channel > 125)
+		channel = cfg_channel;
 
 	/*
-	 * Validate and set the channel input
-	 * value for the radio_init function
+	 * Use TX Power from configuration file if it has not been passed
+	 * through cmd line. -255 means invalid: not informed by user.
 	 */
-	if (channel <= 125 && channel >= 0)
-		channel_radio = channel;
-
+	if (dbm == -255)
+		dbm = cfg_dbm;
 
 	if (host == NULL)
-		return radio_init(spi, channel_radio, tx_pwr_radio);
+		return radio_init(spi, channel, dbm_int2rfpwr(dbm));
 	/*
 	 * TCP development mode: Linux connected to RPi(phynrfd radio
 	 * proxy). Connect to phynrfd routing all traffic over TCP.
