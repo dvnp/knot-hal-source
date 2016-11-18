@@ -28,18 +28,20 @@
 
 #define _MIN(a, b)		((a) < (b) ? (a) : (b))
 
+#define DATA_SIZE 128
 
 static uint8_t listen;
 static uint8_t connection_live;
 /* TODO: Get this values from config file */
 static const struct nrf24_mac addr_gw = {
 					.address.uint64 = 0xDEADBEEF12345678};
-static const struct nrf24_mac addr_thing = {
-					.address.uint64 = 0xACDCDEAD98765432};
-static uint8_t channel_data = 20;
-static uint8_t channel_mgmt= 10;
 
-#define DATA_SIZE 128
+static struct nrf24_mac addr_thing = {.address.uint64 = 0 };//{
+					//.address.uint64 = 0xACDCDEAD98765432};
+static uint8_t channel_raw = 20;
+static uint8_t channel_mgmt = 10;
+static uint16_t window_bcast = 1;		/* ms */
+static uint16_t interval_bcast = 2;	/* ms */
 
 /* Structure to save broadcast context */
 struct nrf24_mgmt {
@@ -237,7 +239,7 @@ static inline int read_data(int spi_fd, int sockfd)
 	return peers[sockfd-1].offset_rx;
 }
 
-static inline int send_data(int spi_fd, int sockfd)
+static inline int send_raw(int spi_fd, int sockfd)
 {
 	int err;
 	struct nrf24_io_pack p;
@@ -335,6 +337,9 @@ static inline void listen_connect(int spi_fd)
 	switch (state) {
 	case 0:
 		/* Send Presence */
+		if (addr_thing.address.uint64 == 0)
+			break;
+
 		p.pipe = 0;
 		opdu->type = NRF24_PDU_TYPE_PRESENCE;
 		payload->address.uint64 = addr_thing.address.uint64;
@@ -345,23 +350,23 @@ static inline void listen_connect(int spi_fd)
 		state = 1;
 		break;
 	case 1:
-		if (hal_timeout(hal_time_ms(), start, 1) > 0){
+		if (hal_timeout(hal_time_ms(), start, window_bcast) > 0){
 			state = 2;
 		}
 		break;
 	case 2:
-		phy_ioctl(spi_fd, NRF24_CMD_SET_STANDBY, &state);
-		start = hal_time_ms();
+		phy_ioctl(spi_fd, NRF24_CMD_SET_STANDBY, NULL);
 		state = 3;
 		break;
 	case 3:
-		if (hal_timeout(hal_time_ms(), start, 1) > 0){
+		if (hal_timeout(hal_time_ms(), start, interval_bcast) > 0){
 			state = 0;
 		}
 		break;
 	}
 }
-static inline int running()
+
+static inline void running(void)
 {
 
 	static int state = 0;
@@ -393,7 +398,7 @@ static inline int running()
 
 	case 2:
 		/* Set channel to data channel */
-		phy_ioctl(driverIndex, NRF24_CMD_SET_CHANNEL, &channel_data);
+		phy_ioctl(driverIndex, NRF24_CMD_SET_CHANNEL, &channel_raw);
 		/* Start timeout */
 		start = hal_time_ms();
 		/* Go to next state */
@@ -417,8 +422,9 @@ static inline int running()
 
 	}
 
-	return -ENOSYS;
 }
+
+/* Global functions */
 
 int hal_comm_init(const char *pathname)
 {
@@ -586,7 +592,8 @@ int hal_comm_listen(int sockfd)
 {
 	//init listen
 	listen = 1;
-	return -ENOSYS;
+
+	return 0;
 }
 
 /* Accept will send presence wait 1ms for connect request
@@ -594,23 +601,33 @@ int hal_comm_listen(int sockfd)
 int hal_comm_accept(int sockfd, uint64_t *addr)
 {
 
+	/* TODO: Run background procedures */
 	struct mgmt_nrf24_header *evt =
 				(struct mgmt_nrf24_header*) mgmt.buffer_rx;
 	struct mgmt_evt_nrf24_connected *evt_connect =
 			(struct mgmt_evt_nrf24_connected *)evt->payload;;
 
-	if(mgmt.len_tx == 0)
+	addr_thing.address.uint64 = *addr;
+
+	if(mgmt.len_rx == 0)
 		return -EAGAIN;
 
-	if(evt->opcode != MGMT_EVT_NRF24_CONNECTED)
+	/* Free management read to receive new packet */
+	mgmt.len_rx = 0;
+
+	if(evt->opcode != MGMT_EVT_NRF24_CONNECTED ||
+		evt_connect->dst.address.uint64 != *addr)
 		return -EAGAIN;
 
-	if(evt_connect->dst.address.uint64 != *addr)
-		return -EAGAIN;
+	/* If is already connected */
+	if (peers[0].pipe != -1)
+		return -EUSERS;
 
-	peers[1].pipe = 1;
+	peers[0].pipe = 1;
 	listen = 0;
-	return peers[1].pipe;
+	connection_live++;
+
+	return peers[0].pipe;
 }
 
 int hal_comm_connect(int sockfd, uint64_t *addr)
@@ -630,7 +647,7 @@ int hal_comm_connect(int sockfd, uint64_t *addr)
 
 	payload->src_addr = addr_gw;
 	payload->dst_addr.address.uint64 = *addr;
-	payload->channel = channel_data;
+	payload->channel = channel_raw;
 	/*
 	 * Set in payload the addr to be set in client.
 	 * sockfd contains the pipe allocated for the client
