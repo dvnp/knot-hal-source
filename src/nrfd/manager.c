@@ -17,60 +17,213 @@
 #include <netinet/in.h>
 #include <glib.h>
 #include <json-c/json.h>
-
+#include <time.h>
+#include <stdbool.h>
 #include "include/comm.h"
 #include "include/nrf24.h"
+#include "include/time.h"
 
 #include "nrf24l01_io.h"
 #include "manager.h"
 
+
+enum {
+	START_TIME,
+	MGMT,
+	RAW
+};
+
+#define TIMEOUT_CONNECT 10
+#define TIMEOUT_DATA	60
+#define MAX_PEERS 5
 static int mgmtfd;
 static guint mgmtwatch;
 
-static gboolean mgmt_read_idle(gpointer user_data)
+struct peer {
+	struct nrf24_mac mac;
+	int8_t socket_fd;
+	unsigned long timeout;
+	gboolean connect;
+};
+static struct peer peers[5] = {
+	{.mac.address.uint64 = 0, .socket_fd = -1, .timeout = 0, .connect = false},
+};
+static uint8_t count_clients;
+
+static int8_t get_peer(struct nrf24_mac mac) {
+
+	int8_t i;
+	for (i = 0; i < MAX_PEERS; i++)
+		if (peers[i].mac.address.uint64 == mac.address.uint64)
+			return i;
+
+	return -1;
+}
+
+static int8_t get_free_peer(void) {
+
+	int8_t i;
+	for (i = 0; i < MAX_PEERS; i++)
+		if (peers[i].mac.address.uint64 == 0)
+			return i;
+
+	return -1;
+}
+
+static int8_t clients_read()
 {
+
+	int8_t i;
 	uint8_t buffer[256];
-	const struct mgmt_nrf24_header *mhdr =
-				(const struct mgmt_nrf24_header *) buffer;
 	ssize_t rbytes;
+	/*No client */
+	if(count_clients == 0) {
+		return 0;
+	}
+
+	for (i = 0; i < MAX_PEERS; i++){
+		if (peers[i].mac.address.uint64 != 0) {
+			rbytes = hal_comm_read(peers[i].socket_fd, buffer, sizeof(buffer));
+			/* If no data */
+			if (rbytes < 0 && rbytes != -EAGAIN) {
+				/* If timeout */
+				if (hal_timeout(hal_time_ms(), peers[i].timeout,
+													TIMEOUT_DATA) > 0) {
+					/* free client posistion */
+					peers[i].mac.address.uint64 = 0;
+					peers[i].connect = false;
+					peers[i].timeout = -1;
+				}
+			}
+		}
+	}
+	return 0;
+}
+
+static void retry_connect(void){
+
+	int8_t i;
+	for (i = 0 ; i < MAX_PEERS; i++) {
+		/* If known peer is not connect and timeout occurred*/
+		if (peers[i].mac.address.uint64 !=0 && !peers[i].connect) {
+			if (hal_timeout(hal_time_ms(), peers[i].timeout,
+													TIMEOUT_CONNECT) > 0)
+				/* Send other connect */
+				hal_comm_connect(mgmtfd, &peers[i].mac.address.uint64);
+				peers[i].timeout = hal_time_ms();
+		}
+	}
+}
+
+static int8_t mgmt_read(void)
+{
+
+	uint8_t buffer[256];
+	struct mgmt_nrf24_header *mhdr = (struct mgmt_nrf24_header *) buffer;
+	struct mgmt_evt_nrf24_bcast_presence *evt_pre;
+	ssize_t rbytes;
+	int8_t position;
+
+	if(count_clients > 0)
+		retry_connect();
 
 	rbytes = hal_comm_read(mgmtfd, buffer, sizeof(buffer));
 
 	/* mgmt on bad state? */
 	if (rbytes < 0 && rbytes != -EAGAIN)
-		return FALSE;
+		return -1;
 
 	/* Nothing to read? */
 	if (rbytes == -EAGAIN)
-		return TRUE;
+		return -1;
 
 	/* Return/ignore if it is not an event? */
 	if (!(mhdr->opcode & 0x0200))
-		return TRUE;
+		return -1;
 
-	printf("MGMT opcode: 0x%04X\n", mhdr->opcode);
-	if (mhdr->opcode != MGMT_EVT_NRF24_BCAST_PRESENCE)
-		return TRUE;
+	switch(mhdr->opcode){
 
-	/* If it is not connected: connect to the indicated peer */
+	case MGMT_EVT_NRF24_BCAST_PRESENCE:
+		/* Get payload */
+		evt_pre = (struct mgmt_evt_nrf24_bcast_presence*) mhdr->payload;
+		if (count_clients >= MAX_PEERS)
+			return -1;
 
-	return TRUE;
+		/*Check if this peer is already allocated */
+		position = get_peer(evt_pre->src);
+		/* If this is a new peer */
+		if (position < 0){
+			/*Send Connect */
+			hal_comm_connect(mgmtfd, &evt_pre->src.address.uint64);
+			position = get_free_peer();
+			peers[position].mac.address.uint64 =
+					evt_pre->src.address.uint64;
+			peers[position].timeout = hal_time_ms();
+			peers[position].socket_fd =
+					hal_comm_socket(HAL_COMM_PF_NRF24, HAL_COMM_PROTO_RAW);
+			count_clients++;
+		}
+		break;
+
+	case MGMT_EVT_NRF24_BCAST_SETUP:
+		break;
+
+	case MGMT_EVT_NRF24_BCAST_BEACON:
+		break;
+
+	case MGMT_EVT_NRF24_DISCONNECTED:
+		/*position = get_peer(evt_disconnected->src);
+		peers[position].mac.address.uint64 = 0;
+		peers[position].socket_fd = 0;
+		peers[position].timeout = -1; */
+		count_clients--;
+		break;
+	}
+	return 0;
+}
+
+static gboolean read_idle(gpointer user_data)
+{
+	// static int state = 0;
+	// static unsigned long start;
+
+	// switch (state) {
+
+	// case START_TIME:
+	// 	/* Start timeout */
+	// 	start = hal_time_ms();
+	// 	 Go to next state
+	// 	state = MGMT;
+	// 	break;
+
+	// case MGMT:
+	// 	mgmt_read(start);
+	// 	if(count_clients > 0)
+	// 		state = RAW;
+	// 	break;
+
+	// case RAW:
+	// 	clients_read(start);
+	// 	break;
+	// }
+
+	return 0;
 }
 
 static int radio_init(const char *spi, uint8_t channel, uint8_t rfpwr)
 {
 	int err;
-
-	err = hal_comm_init(spi);
+	printf("radio init\n");
+	err = hal_comm_init("NRF0");
 	if (err < 0)
 		return err;
 
+	printf("open socket mgmt\n");
 	mgmtfd = hal_comm_socket(HAL_COMM_PF_NRF24, HAL_COMM_PROTO_MGMT);
 	if (mgmtfd < 0)
 		goto done;
 
-	mgmtwatch = g_idle_add(mgmt_read_idle, NULL);
-
+	mgmtwatch = g_idle_add(read_idle, NULL);
 	return 0;
 done:
 	hal_comm_deinit();
