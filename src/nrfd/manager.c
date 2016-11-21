@@ -42,11 +42,9 @@ static guint mgmtwatch;
 struct peer {
 	struct nrf24_mac mac;
 	int8_t socket_fd;
-	unsigned long timeout;
-	gboolean connect;
 };
 static struct peer peers[5] = {
-	{.mac.address.uint64 = 0, .socket_fd = -1, .timeout = 0, .connect = false},
+	{.mac.address.uint64 = 0, .socket_fd = -1},
 };
 static uint8_t count_clients;
 
@@ -75,57 +73,79 @@ static int8_t clients_read()
 
 	int8_t i;
 	uint8_t buffer[256];
-	ssize_t rbytes;
+
 	/*No client */
 	if(count_clients == 0) {
 		return 0;
 	}
 
-	for (i = 0; i < MAX_PEERS; i++){
-		if (peers[i].mac.address.uint64 != 0) {
-			rbytes = hal_comm_read(peers[i].socket_fd, buffer, sizeof(buffer));
-			/* If no data */
-			if (rbytes < 0 && rbytes != -EAGAIN) {
-				/* If timeout */
-				if (hal_timeout(hal_time_ms(), peers[i].timeout,
-													TIMEOUT_DATA) > 0) {
-					/* free client posistion */
-					peers[i].mac.address.uint64 = 0;
-					peers[i].connect = false;
-					peers[i].timeout = -1;
-				}
-			}
-		}
+	for (i = 0; i < MAX_PEERS; i++) {
+		if (peers[i].mac.address.uint64 == 0)
+				continue;
+		hal_comm_read(peers[i].socket_fd, buffer, sizeof(buffer));
+		//send data to knotd
+		//write
+	}
+	return 0;
+}
+static int8_t evt_presence(struct mgmt_nrf24_header *mhdr)
+{
+	int8_t position;
+	struct mgmt_evt_nrf24_bcast_presence *evt_pre =
+				(struct mgmt_evt_nrf24_bcast_presence*) mhdr->payload;
+
+
+	if (count_clients >= MAX_PEERS)
+		return -EUSERS; /*MAX PEERS*/
+
+	/*Check if this peer is already allocated */
+	position = get_peer(evt_pre->src);
+	/* If this is a new peer */
+	if (position < 0) {
+		/* Get free peers position */
+		position = get_free_peer();
+		/* Set mac value for this position */
+		peers[position].mac.address.uint64 =
+				evt_pre->src.address.uint64;
+		/*Create Socket */
+		peers[position].socket_fd =
+				hal_comm_socket(HAL_COMM_PF_NRF24, HAL_COMM_PROTO_RAW);
+		/*Send Connect */
+		hal_comm_connect(peers[position].socket_fd,
+					&evt_pre->src.address.uint64);
+
+		count_clients++;
+	}else {
+		/* Resend connect */
+		hal_comm_connect(peers[position].socket_fd,
+			&evt_pre->src.address.uint64);
 	}
 	return 0;
 }
 
-static void retry_connect(void){
+static int8_t evt_disconnected(struct mgmt_nrf24_header *mhdr)
+{
+	struct mgmt_evt_nrf24_disconnected *evt_disc =
+				(struct mgmt_evt_nrf24_disconnected*) mhdr->payload;
+	int8_t position;
 
-	int8_t i;
-	for (i = 0 ; i < MAX_PEERS; i++) {
-		/* If known peer is not connect and timeout occurred*/
-		if (peers[i].mac.address.uint64 !=0 && !peers[i].connect) {
-			if (hal_timeout(hal_time_ms(), peers[i].timeout,
-													TIMEOUT_CONNECT) > 0)
-				/* Send other connect */
-				hal_comm_connect(mgmtfd, &peers[i].mac.address.uint64);
-				peers[i].timeout = hal_time_ms();
-		}
-	}
+	position = get_peer(evt_disc->src);
+	/* If this client is not connected*/
+	if (position < 0)
+		return -EINVAL;
+
+	peers[position].mac.address.uint64 = 0;
+	peers[position].socket_fd = -1;
+	count_clients--;
+
+	return 0;
 }
-
 static int8_t mgmt_read(void)
 {
 
 	uint8_t buffer[256];
 	struct mgmt_nrf24_header *mhdr = (struct mgmt_nrf24_header *) buffer;
-	struct mgmt_evt_nrf24_bcast_presence *evt_pre;
 	ssize_t rbytes;
-	int8_t position;
-
-	if(count_clients > 0)
-		retry_connect();
 
 	rbytes = hal_comm_read(mgmtfd, buffer, sizeof(buffer));
 
@@ -141,28 +161,10 @@ static int8_t mgmt_read(void)
 	if (!(mhdr->opcode & 0x0200))
 		return -1;
 
-	switch(mhdr->opcode){
+	switch(mhdr->opcode) {
 
 	case MGMT_EVT_NRF24_BCAST_PRESENCE:
-		/* Get payload */
-		evt_pre = (struct mgmt_evt_nrf24_bcast_presence*) mhdr->payload;
-		if (count_clients >= MAX_PEERS)
-			return -1;
-
-		/*Check if this peer is already allocated */
-		position = get_peer(evt_pre->src);
-		/* If this is a new peer */
-		if (position < 0){
-			/*Send Connect */
-			hal_comm_connect(mgmtfd, &evt_pre->src.address.uint64);
-			position = get_free_peer();
-			peers[position].mac.address.uint64 =
-					evt_pre->src.address.uint64;
-			peers[position].timeout = hal_time_ms();
-			peers[position].socket_fd =
-					hal_comm_socket(HAL_COMM_PF_NRF24, HAL_COMM_PROTO_RAW);
-			count_clients++;
-		}
+		return evt_presence(mhdr);
 		break;
 
 	case MGMT_EVT_NRF24_BCAST_SETUP:
@@ -172,11 +174,7 @@ static int8_t mgmt_read(void)
 		break;
 
 	case MGMT_EVT_NRF24_DISCONNECTED:
-		/*position = get_peer(evt_disconnected->src);
-		peers[position].mac.address.uint64 = 0;
-		peers[position].socket_fd = 0;
-		peers[position].timeout = -1; */
-		count_clients--;
+		return evt_disconnected(mhdr);
 		break;
 	}
 	return 0;
@@ -184,29 +182,8 @@ static int8_t mgmt_read(void)
 
 static gboolean read_idle(gpointer user_data)
 {
-	// static int state = 0;
-	// static unsigned long start;
-
-	// switch (state) {
-
-	// case START_TIME:
-	// 	/* Start timeout */
-	// 	start = hal_time_ms();
-	// 	 Go to next state
-	// 	state = MGMT;
-	// 	break;
-
-	// case MGMT:
-	// 	mgmt_read(start);
-	// 	if(count_clients > 0)
-	// 		state = RAW;
-	// 	break;
-
-	// case RAW:
-	// 	clients_read(start);
-	// 	break;
-	// }
-
+	mgmt_read();
+	clients_read();
 	return 0;
 }
 
