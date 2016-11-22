@@ -107,6 +107,8 @@ static int channel_raw = 10;
 static uint16_t window_bcast = 1;	/* ms */
 static uint16_t interval_bcast = 2;	/* ms */
 
+static uint8_t enable_keepalive = 0;
+
 enum {
 	START_MGMT,
 	MGMT,
@@ -166,6 +168,32 @@ static int write_keepalive(int spi_fd, int sockfd, int keepalive_op)
 		return err;
 
 	return 0;
+}
+
+static int check_keepalive(int spi_fd, int sockfd)
+{
+
+	int err = 0;
+	/* Check if timeout occurred */
+	if (hal_timeout(hal_time_ms(), peers[sockfd-1].keepalive_wait,
+		NRF24_KEEPALIVE_TIMEOUT_MS) > 0)
+		return -ETIMEDOUT;
+
+	/* Sends keepalive request every NRF24_KEEPALIVE_SEND_MS */
+	if (hal_timeout(hal_time_ms(), peers[sockfd-1].keepalive_wait,
+		peers[sockfd-1].keepalive * NRF24_KEEPALIVE_SEND_MS) > 0) {
+		/* Sends keepalive packet */
+		err = write_keepalive(spi_fd, sockfd,
+				NRF24_LL_CRTL_OP_KEEPALIVE_REQ);
+
+		if (err < 0)
+			return err;
+
+		peers[sockfd-1].keepalive += 1;
+	}
+
+
+	return err;
 }
 
 static int write_mgmt(int spi_fd)
@@ -491,7 +519,6 @@ static void presence_connect(int spi_fd)
 	}
 }
 
-
 static void running(void)
 {
 
@@ -536,20 +563,53 @@ static void running(void)
 	case RAW:
 		/* Check if 60ms timeout occurred */
 		if (hal_timeout(hal_time_ms(), start, 60) > 0)
-			state = 0;
+			state = START_MGMT;
 
+		/* Check if pipe is allocated */
+		if (peers[sockIndex-1].pipe != -1) {
+			read_raw(driverIndex, sockIndex);
+			write_raw(driverIndex, sockIndex);
+
+			/*
+			 * If keepalive is enabled
+			 * Check if timeout occurred and generates
+			 * disconnect event
+			 */
+
+			if (enable_keepalive &&
+				check_keepalive(driverIndex, sockIndex) == -ETIMEDOUT &&
+				peers[sockIndex-1].len_rx == 0) {
+
+				struct mgmt_nrf24_header *evt =
+					(struct mgmt_nrf24_header *)peers[sockIndex-1].buffer_rx;
+
+				struct mgmt_evt_nrf24_disconnected *evt_discon =
+					(struct mgmt_evt_nrf24_disconnected *)evt->payload;
+
+				evt->opcode = MGMT_EVT_NRF24_DISCONNECTED;
+
+				memcpy(evt_discon->src.address.b,
+						aa_pipes[sockIndex-1],
+						sizeof(aa_pipes[sockIndex-1]));
+
+				evt_discon->dst.address.uint64 =
+					addr_gw.address.uint64;
+
+				peers[sockIndex-1].len_rx =
+					sizeof(struct mgmt_nrf24_header) +
+					sizeof(struct mgmt_evt_nrf24_disconnected);
+
+				peers[sockIndex].pipe = -1;
+
+				/* TODO: Send disconnect packet to thing */
+			}
+		}
+
+		sockIndex++;
 		/* Resets sockIndex */
 		if (sockIndex > CONNECTION_COUNTER)
 			sockIndex = 1;
 
-		/* Check if pipe is allocated */
-		if (peers[sockIndex-1].pipe != -1) {
-			write_raw(driverIndex, sockIndex);
-			read_raw(driverIndex, sockIndex);
-		}
-
-
-		sockIndex++;
 		break;
 
 	}
@@ -725,6 +785,9 @@ int hal_comm_listen(int sockfd)
 {
 	/* Init listen */
 	listen = 1;
+
+	/* Enable thing to send keep alive request */
+	enable_keepalive = 1;
 
 	return 0;
 }
