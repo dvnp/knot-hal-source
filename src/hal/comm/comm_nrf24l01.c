@@ -375,12 +375,19 @@ static int write_raw(int spi_fd, int sockfd)
 
 		/* Send packet */
 		err = phy_write(spi_fd, &p, plen + DATA_HDR_SIZE);
-		if (err < 0)
+		if (err < 0) {
+			peers[sockfd-1].len_tx = 0;
+			peers[sockfd-1].seqnumber_tx = 0;
 			return err;
+		}
 
 		left -= plen;
 		peers[sockfd-1].seqnumber_tx++;
 	}
+
+	/* Restart keepalive timeout */
+	peers[sockfd-1].keepalive_wait = hal_time_ms();
+	peers[sockfd-1].keepalive = 1;
 
 	err = peers[sockfd-1].len_tx;
 
@@ -452,6 +459,10 @@ static int read_raw(int spi_fd, int sockfd)
 		/* If is Data */
 		case NRF24_PDU_LID_DATA_FRAG:
 		case NRF24_PDU_LID_DATA_END:
+			/* Restart keepalive timeout */
+			peers[sockfd-1].keepalive_wait = hal_time_ms();
+			peers[sockfd-1].keepalive = 1;
+
 			if (peers[sockfd-1].len_rx != 0)
 				break; /* Discard packet */
 
@@ -619,10 +630,10 @@ static void running(void)
 			 */
 
 			if (check_keepalive(driverIndex, sockIndex) == -ETIMEDOUT &&
-				peers[sockIndex-1].len_rx == 0) {
+				mgmt.len_rx == 0) {
 
 				struct mgmt_nrf24_header *evt =
-					(struct mgmt_nrf24_header *)peers[sockIndex-1].buffer_rx;
+					(struct mgmt_nrf24_header *) mgmt.buffer_rx;
 
 				struct mgmt_evt_nrf24_disconnected *evt_discon =
 					(struct mgmt_evt_nrf24_disconnected *)evt->payload;
@@ -635,7 +646,7 @@ static void running(void)
 				evt_discon->dst.address.uint64 =
 					addr_gw.address.uint64;
 
-				peers[sockIndex-1].len_rx =
+				mgmt.len_rx =
 					sizeof(struct mgmt_nrf24_header) +
 					sizeof(struct mgmt_evt_nrf24_disconnected);
 
@@ -887,6 +898,9 @@ int hal_comm_accept(int sockfd, uint64_t *addr)
 	peers[sockfd-1].mac.address.uint64 =
 		evt_connect->src.address.uint64;
 
+	/* Enable thing to send keep alive request */
+	peers[sockfd-1].keepalive = 1;
+
 	/* Return pipe */
 	return pipe;
 }
@@ -929,6 +943,10 @@ int hal_comm_connect(int sockfd, uint64_t *addr)
 
 	/* If connect then increment connection_live */
 	connection_live++;
+
+	/* Enable nrfd to send keep alive request */
+	peers[sockfd-1].keepalive = 1;
+
 	mgmt.len_tx = len;
 
 	return 0;
