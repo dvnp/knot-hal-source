@@ -64,6 +64,7 @@ struct nrf24_data {
 	size_t offset_rx;
 	unsigned long keepalive_wait;
 	uint8_t keepalive;
+	struct nrf24_mac mac;
 };
 
 #ifndef ARDUINO	/* If gateway then 5 peers */
@@ -147,6 +148,9 @@ static inline int alloc_pipe(void)
 			peers[i].seqnumber_rx = 0;
 			peers[i].seqnumber_tx = 0;
 			peers[i].offset_rx = 0;
+			peers[i].keepalive_wait = 0;
+			peers[i].keepalive = 0;
+			peers[i].mac.address.uint64 = 0;
 			/* one peer for pipe*/
 			peers[i].pipe = i+1;
 			return peers[i].pipe;
@@ -157,7 +161,9 @@ static inline int alloc_pipe(void)
 	return -1;
 }
 
-static int write_keepalive(int spi_fd, int sockfd, int keepalive_op)
+
+static int write_keepalive(int spi_fd, int sockfd, int keepalive_op,
+							struct nrf24_mac dst, struct nrf24_mac src)
 {
 	int err;
 	/* Assemble keep alive package */
@@ -167,14 +173,21 @@ static int write_keepalive(int spi_fd, int sockfd, int keepalive_op)
 	struct nrf14_ll_crtl_pdu *ctrl =
 		(struct nrf14_ll_crtl_pdu *)opdu->payload;
 
+	struct nrf14_ll_keepalive *kpalive =
+		(struct nrf14_ll_keepalive *) ctrl->payload;
+
 	opdu->lid = NRF24_PDU_LID_CONTROL;
 	p.pipe = sockfd;
 	/* Keep alive opcode - Request or Response */
 	ctrl->opcode = keepalive_op;
 
+	kpalive->dst_addr.address.uint64 = dst.address.uint64;
+	kpalive->src_addr.address.uint64 = src.address.uint64;
 	/* Sends keep alive packet */
-	err = phy_write(spi_fd, &p, sizeof(struct nrf24_ll_data_pdu) +
-		sizeof(struct nrf14_ll_crtl_pdu));
+	err = phy_write(spi_fd, &p,
+					sizeof(struct nrf24_ll_data_pdu) +
+					sizeof(struct nrf14_ll_crtl_pdu) +
+					sizeof(struct nrf14_ll_keepalive));
 
 	if (err < 0)
 		return err;
@@ -201,7 +214,8 @@ static int check_keepalive(int spi_fd, int sockfd)
 		peers[sockfd-1].keepalive * NRF24_KEEPALIVE_SEND_MS) > 0) {
 		/* Sends keepalive packet */
 		err = write_keepalive(spi_fd, sockfd,
-				NRF24_LL_CRTL_OP_KEEPALIVE_REQ);
+				NRF24_LL_CRTL_OP_KEEPALIVE_REQ,
+				peers[sockfd-1].mac, addr_thing);
 
 		peers[sockfd-1].keepalive += 1;
 	}
@@ -399,11 +413,17 @@ static int read_raw(int spi_fd, int sockfd)
 			struct nrf14_ll_crtl_pdu *ctrl =
 				(struct nrf14_ll_crtl_pdu *)ipdu->payload;
 
+			struct nrf14_ll_keepalive *kpalive =
+				(struct nrf14_ll_keepalive *) ctrl->payload;
 			/*
 			 * If is keep alive then resets keepalive_wait
 			 * Thing side
 			 */
-			if (ctrl->opcode == NRF24_LL_CRTL_OP_KEEPALIVE_RSP) {
+			if (ctrl->opcode == NRF24_LL_CRTL_OP_KEEPALIVE_RSP &&
+				kpalive->src_addr.address.uint64 ==
+				peers[sockfd-1].mac.address.uint64 &&
+				kpalive->dst_addr.address.uint64 ==
+				addr_thing.address.uint64) {
 				peers[sockfd-1].keepalive_wait = hal_time_ms();
 				peers[sockfd-1].keepalive = 1;
 			}
@@ -412,11 +432,18 @@ static int read_raw(int spi_fd, int sockfd)
 			 * If is keep alive then resets keepalive_wait
 			 * NRFD side
 			 */
-			if (ctrl->opcode == NRF24_LL_CRTL_OP_KEEPALIVE_REQ) {
+
+			if (ctrl->opcode == NRF24_LL_CRTL_OP_KEEPALIVE_REQ &&
+				kpalive->src_addr.address.uint64 ==
+				peers[sockfd-1].mac.address.uint64 &&
+				kpalive->dst_addr.address.uint64 ==
+				addr_gw.address.uint64) {
 				peers[sockfd-1].keepalive_wait = hal_time_ms();
 				peers[sockfd-1].keepalive = 1;
 				write_keepalive(spi_fd, sockfd,
-					NRF24_LL_CRTL_OP_KEEPALIVE_RSP);
+					NRF24_LL_CRTL_OP_KEEPALIVE_RSP,
+					peers[sockfd-1].mac,
+					addr_gw);
 			}
 
 		}
@@ -856,8 +883,9 @@ int hal_comm_accept(int sockfd, uint64_t *addr)
 	/* If accept then increment connection_live */
 	connection_live++;
 
-	/* Enable thing to send keep alive request */
-	peers[sockfd-1].keepalive = 1;
+	/* Source address of gateway for keepalive message */
+	peers[sockfd-1].mac.address.uint64 =
+		evt_connect->src.address.uint64;
 
 	/* Return pipe */
 	return pipe;
@@ -892,6 +920,9 @@ int hal_comm_connect(int sockfd, uint64_t *addr)
 	 */
 	memcpy(payload->aa, aa_pipes[sockfd],
 		sizeof(aa_pipes[sockfd]));
+
+	/* Source address of thing for keepalive message */
+	peers[sockfd-1].mac.address.uint64 = *addr;
 
 	len = sizeof(struct nrf24_ll_mgmt_connect);
 	len += sizeof(struct nrf24_ll_mgmt_pdu);
