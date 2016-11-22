@@ -425,7 +425,7 @@ static void running(void)
 {
 
 	static int state = 0;
-	static int sockIndex = 0; /* Index peers */
+	static int sockIndex = 1; /* Index peers */
 	static unsigned long start;
 
 	switch (state) {
@@ -467,11 +467,12 @@ static void running(void)
 		if (hal_timeout(hal_time_ms(), start, 60) > 0)
 			state = 0;
 
-		if (sockIndex == CONNECTION_COUNTER)
-			sockIndex = 0;
+		/* Resets sockIndex */
+		if (sockIndex > CONNECTION_COUNTER)
+			sockIndex = 1;
 
 		/* Check if pipe is allocated */
-		if (peers[sockIndex].pipe != -1) {
+		if (peers[sockIndex-1].pipe != -1) {
 			write_raw(driverIndex, sockIndex);
 			read_raw(driverIndex, sockIndex);
 		}
