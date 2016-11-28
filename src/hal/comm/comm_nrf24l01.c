@@ -173,6 +173,7 @@ static int write_keepalive(int spi_fd, int sockfd, int keepalive_op)
 	ctrl->opcode = keepalive_op;
 
 	/* Sends keep alive packet */
+	// printf("SEND KEEP ALIVE\n");
 	err = phy_write(spi_fd, &p, sizeof(struct nrf24_ll_data_pdu) +
 		sizeof(struct nrf14_ll_crtl_pdu));
 
@@ -223,7 +224,7 @@ static int write_mgmt(int spi_fd)
 	p.pipe = 0;
 	/* Copy buffer_tx to payload */
 	memcpy(p.payload, mgmt.buffer_tx, mgmt.len_tx);
-
+	//printf("write_mgmt\n" );
 	err = phy_write(spi_fd, &p, mgmt.len_tx);
 	if (err < 0)
 		return err;
@@ -332,9 +333,9 @@ static int write_raw(int spi_fd, int sockfd)
 	p.pipe = sockfd;
 	/* Amount of bytes to be sent */
 	left = peers[sockfd-1].len_tx;
-
+	//printf("left = %d\n",left);
 	while (left) {
-
+		//printf("ESCREVENDO\n");
 		/* Delay to avoid sending all packets too fast */
 		hal_delay_us(512);
 		/*
@@ -360,9 +361,13 @@ static int write_raw(int spi_fd, int sockfd)
 			(peers[sockfd-1].len_tx - left), plen);
 
 		/* Send packet */
+		//printf("write_raw     %s\n", opdu->payload);
 		err = phy_write(spi_fd, &p, plen + DATA_HDR_SIZE);
-		if (err < 0)
+		if (err < 0) {
+			peers[sockfd-1].len_tx = 0;
+			peers[sockfd-1].seqnumber_tx = 0;
 			return err;
+		}
 
 		left -= plen;
 		peers[sockfd-1].seqnumber_tx++;
@@ -373,7 +378,7 @@ static int write_raw(int spi_fd, int sockfd)
 	/* Resets controls */
 	peers[sockfd-1].len_tx = 0;
 	peers[sockfd-1].seqnumber_tx = 0;
-
+	// printf("RETORNOU\n");
 	return err;
 }
 
@@ -391,6 +396,7 @@ static int read_raw(int spi_fd, int sockfd)
 	 */
 	while ((ilen = phy_read(spi_fd, &p, NRF24_MTU)) > 0) {
 		/* Check if is data or Control */
+		// printf("read_raw\n");
 		switch (ipdu->lid) {
 
 		/* If is Control */
@@ -540,7 +546,7 @@ static void running(void)
 	/* Index peers */
 	static int sockIndex = 1;
 	static unsigned long start;
-
+	int i;
 	switch (state) {
 
 	case START_MGMT:
@@ -582,6 +588,9 @@ static void running(void)
 
 		/* Check if pipe is allocated */
 		if (peers[sockIndex-1].pipe != -1) {
+			// printf("inside running\n");
+			// for (i =0; i<CONNECTION_COUNTER; i++)
+			// 	printf("pipe = %d len = %d %d\n",i, peers[i].len_rx, peers[i].len_tx);
 			read_raw(driverIndex, sockIndex);
 			write_raw(driverIndex, sockIndex);
 
@@ -592,10 +601,10 @@ static void running(void)
 			 */
 
 			if (check_keepalive(driverIndex, sockIndex) == -ETIMEDOUT &&
-				peers[sockIndex-1].len_rx == 0) {
-
+				mgmt.len_rx == 0) {
+				// printf("inside check_keepalive\n");
 				struct mgmt_nrf24_header *evt =
-					(struct mgmt_nrf24_header *)peers[sockIndex-1].buffer_rx;
+					(struct mgmt_nrf24_header *) mgmt.buffer_rx;
 
 				struct mgmt_evt_nrf24_disconnected *evt_discon =
 					(struct mgmt_evt_nrf24_disconnected *)evt->payload;
@@ -608,7 +617,7 @@ static void running(void)
 				evt_discon->dst.address.uint64 =
 					addr_gw.address.uint64;
 
-				peers[sockIndex-1].len_rx =
+				mgmt.len_rx =
 					sizeof(struct mgmt_nrf24_header) +
 					sizeof(struct mgmt_evt_nrf24_disconnected);
 
@@ -618,12 +627,15 @@ static void running(void)
 
 		sockIndex++;
 		/* Resets sockIndex if sockIndex > CONNECTION_COUNTER */
-		if (sockIndex > CONNECTION_COUNTER)
+		if (sockIndex > CONNECTION_COUNTER){
+			// printf("loop again\n");
 			sockIndex = 1;
+		}
 
 		break;
 
 	}
+	// printf("saiu do running\n");
 }
 
 /* Global functions */
@@ -797,6 +809,7 @@ ssize_t hal_comm_write(int sockfd, const void *buffer, size_t count)
 	if (peers[sockfd-1].len_tx != 0)
 		return -EBUSY;
 
+	//printf("put data in tx\n");
 	/* Copy data to be write in tx buffer */
 	memcpy(peers[sockfd-1].buffer_tx, buffer, count);
 	peers[sockfd-1].len_tx = count;
@@ -898,6 +911,8 @@ int hal_comm_connect(int sockfd, uint64_t *addr)
 
 	/* If connect then increment connection_live */
 	connection_live++;
+	/* Enable NRFD to send keep alive request */
+	peers[sockfd-1].keepalive = 1;
 	mgmt.len_tx = len;
 
 	return 0;
