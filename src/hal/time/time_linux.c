@@ -9,6 +9,7 @@
 
 #include <unistd.h>
 #include <inttypes.h>
+#include <stdlib.h>
 #include <time.h>
 #include <limits.h>
 
@@ -71,4 +72,18 @@ int hal_timeout(uint32_t current,  uint32_t start,  uint32_t timeout)
 
 	/* Timeout is flagged */
 	return (current >= timeout);
+}
+
+uint32_t hal_random_value(uint32_t interval, uint32_t ntime, uint32_t min)
+{
+	uint32_t value = 9973 * ~hal_time_us();
+
+	srand((unsigned int)value);
+
+	value = (rand() % interval) * ntime;
+	if (value < min)
+		value += min;
+
+
+	return value;
 }

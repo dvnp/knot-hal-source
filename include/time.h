@@ -19,6 +19,7 @@ uint32_t hal_time_us(void);
 void hal_delay_ms(uint32_t ms);
 void hal_delay_us(uint32_t us);
 int hal_timeout(uint32_t current,  uint32_t start,  uint32_t timeout);
+uint32_t hal_random_value(uint32_t interval, uint32_t ntime, uint32_t min);
 
 #ifdef __cplusplus
 }
